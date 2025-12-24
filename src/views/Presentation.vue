@@ -113,8 +113,10 @@ const initDrawingCanvas = () => {
     if (ctx) {
         ctx.lineCap = 'round'
         ctx.lineJoin = 'round'
-        ctx.lineWidth = 4
-        ctx.strokeStyle = '#FF0000'
+        ctx.lineWidth = 5 // 稍微加粗一点
+        ctx.strokeStyle = '#ef4444' // 使用 Element Plus 的 Danger Red，更显眼
+        ctx.shadowBlur = 2; // 增加一点点光晕
+        ctx.shadowColor = '#ef4444';
     }
 }
 
@@ -300,35 +302,51 @@ const slideStyle = reactive({
 })
 </script>
 
+/* src/views/Presentation.vue 中的样式替换建议 */
 <style scoped lang="scss">
+// 变量定义
+$primary-color: #409eff;
+$sidebar-bg: #1e293b; // 更现代的深蓝灰
+$main-bg: #f3f4f6;
+$glass-bg: rgba(255, 255, 255, 0.15);
+$glass-border: 1px solid rgba(255, 255, 255, 0.2);
+
 .presentation-container {
     height: 100vh;
     display: flex;
     flex-direction: column;
-    background-color: #f0f2f5;
-    transition: background-color 0.3s;
+    background-color: $main-bg;
+    transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
 
     &.is-fullscreen {
         background-color: #000;
 
         .stage {
             padding: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            background: #000;
         }
     }
 }
 
 .header {
-    height: 50px;
-    background: white;
-    border-bottom: 1px solid #ddd;
+    height: 64px; // 增加高度
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0 20px;
+    padding: 0 24px;
     flex-shrink: 0;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+    z-index: 10;
+
+    .file-name {
+        margin-left: 12px;
+        font-weight: 600;
+        color: #334155;
+        font-size: 14px;
+    }
 }
 
 .main-content {
@@ -339,46 +357,73 @@ const slideStyle = reactive({
 }
 
 .sidebar {
-    width: 240px;
-    background: #2d3035;
-    overflow-y: auto;
-    padding: 15px;
+    width: 260px;
+    background: $sidebar-bg;
+    overflow-y: overlay; // 滚动条覆盖模式
+    padding: 20px 16px;
     display: flex;
     flex-direction: column;
-    gap: 15px;
-    border-right: 1px solid #444;
+    gap: 16px;
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
     flex-shrink: 0;
+
+    // 隐藏默认滚动条但保留功能
+    &::-webkit-scrollbar {
+        width: 6px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 3px;
+    }
 
     .thumbnail-wrapper {
         cursor: pointer;
-        text-align: center;
-        opacity: 0.7;
-        transition: all 0.2s;
+        transition: all 0.3s ease;
+        position: relative;
+        padding: 4px;
+        border-radius: 8px;
 
         &:hover {
-            opacity: 1;
+            background: rgba(255, 255, 255, 0.05);
+            transform: translateY(-2px);
         }
 
         &.active {
-            opacity: 1;
+            background: rgba($primary-color, 0.15);
 
             .thumb-box {
-                border-color: #409eff;
-                box-shadow: 0 0 10px rgba(64, 158, 255, 0.5);
+                border-color: $primary-color;
+                box-shadow: 0 0 0 3px rgba($primary-color, 0.3);
+            }
+
+            // 添加页码角标
+            &::after {
+                content: '';
+                position: absolute;
+                left: -16px;
+                top: 50%;
+                transform: translateY(-50%);
+                width: 4px;
+                height: 24px;
+                background: $primary-color;
+                border-radius: 0 4px 4px 0;
             }
         }
 
         .thumb-box {
             border: 2px solid transparent;
             background: white;
-            border-radius: 4px;
+            border-radius: 6px;
             overflow: hidden;
             line-height: 0;
+            transition: border-color 0.3s, box-shadow 0.3s;
         }
 
         .thumb-canvas {
             width: 100%;
             height: auto;
+            display: block;
         }
     }
 }
@@ -386,86 +431,114 @@ const slideStyle = reactive({
 .stage {
     flex: 1;
     background: #eef0f3;
+    background-image: radial-gradient(#dfe3e8 1px, transparent 1px); // 点阵背景
+    background-size: 20px 20px;
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
     position: relative;
+    padding: 20px;
 }
 
-.fullscreen-exit-btn {
+// 统一悬浮控件风格
+%floating-pill {
     position: absolute;
-    top: 20px;
-    right: 20px;
-    background: rgba(255, 255, 255, 0.2);
+    background: rgba(30, 41, 59, 0.7);
+    backdrop-filter: blur(8px);
     color: white;
-    padding: 8px 16px;
-    border-radius: 20px;
-    cursor: pointer;
+    border-radius: 50px;
+    padding: 8px 20px;
+    font-size: 14px;
     z-index: 1000;
-    backdrop-filter: blur(5px);
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    transition: background 0.2s;
+    border: $glass-border;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    transition: all 0.3s;
 
     &:hover {
-        background: rgba(255, 255, 255, 0.4);
+        background: rgba(30, 41, 59, 0.9);
+        transform: scale(1.05);
     }
 }
 
+.fullscreen-exit-btn {
+    @extend %floating-pill;
+    top: 30px;
+    right: 30px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .fullscreen-page-indicator {
-    position: absolute;
-    bottom: 20px;
+    @extend %floating-pill;
+    bottom: 30px;
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(0, 0, 0, 0.5);
-    color: white;
-    padding: 4px 12px;
-    border-radius: 12px;
-    font-size: 14px;
-    z-index: 1000;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 1px;
+
+    &:hover {
+        transform: translateX(-50%) scale(1.05);
+    }
 }
 
 .drawing-tip {
-    position: absolute;
-    top: 80px;
+    @extend %floating-pill;
+    top: 100px; // 下移一点避免遮挡
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(255, 193, 7, 0.9);
-    color: #333;
-    padding: 8px 20px;
-    border-radius: 20px;
-    font-weight: bold;
-    z-index: 1000;
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+    background: rgba(234, 179, 8, 0.9); // 黄色警告色
+    color: #0f172a;
+    font-weight: 600;
+    border: none;
+    animation: fadeInDown 0.5s ease;
+}
+
+@keyframes fadeInDown {
+    from {
+        opacity: 0;
+        transform: translate(-50%, -20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translate(-50%, 0);
+    }
 }
 
 .laser-pointer {
     position: absolute;
     width: 20px;
     height: 20px;
-    background: rgba(255, 0, 0, 0.5);
-    border: 2px solid rgba(255, 255, 255, 0.8);
+    background: rgba(239, 68, 68, 0.6); // 红色
+    border: 2px solid #fff;
     border-radius: 50%;
     pointer-events: none;
     transform: translate(-50%, -50%);
     z-index: 9999;
-    box-shadow: 0 0 10px rgba(255, 0, 0, 0.8);
-    transition: width 0.15s, height 0.15s, background-color 0.15s;
+    box-shadow: 0 0 15px rgba(239, 68, 68, 0.8), inset 0 0 5px rgba(255, 255, 255, 0.5);
+    transition: width 0.1s cubic-bezier(0.4, 0, 0.2, 1),
+        height 0.1s cubic-bezier(0.4, 0, 0.2, 1),
+        opacity 0.2s;
 
     &.drawing {
-        width: 10px;
-        height: 10px;
-        background: rgba(255, 0, 0, 1);
-        border-color: #FFFF00;
-        box-shadow: 0 0 5px rgba(255, 0, 0, 1);
+        width: 8px;
+        height: 8px;
+        background: #ef4444;
+        border-color: #fef08a; // 黄色边框
+        box-shadow: 0 0 10px #ef4444;
     }
 }
 
 .slide-wrapper {
     line-height: 0;
     position: relative;
+    border-radius: 8px;
+    // 增加 PPT 投影感
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3) !important;
+    transition: transform 0.2s;
 }
 
 .drawing-canvas {

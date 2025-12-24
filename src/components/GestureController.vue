@@ -302,27 +302,63 @@ onBeforeUnmount(() => {
 })
 </script>
 
+/* src/components/GestureController.vue 中的样式替换建议 */
 <style scoped>
 .gesture-container {
     position: absolute;
-    bottom: 20px;
-    right: 20px;
+    bottom: 24px;
+    right: 24px;
     z-index: 9999;
     pointer-events: none;
+    /* 容器穿透，但内部元素可以交互 */
     display: flex;
     flex-direction: column;
     align-items: flex-end;
+    gap: 12px;
 }
 
 .camera-wrapper {
     position: relative;
-    width: 160px;
-    height: 120px;
-    border-radius: 8px;
+    width: 180px;
+    height: 135px;
+    border-radius: 12px;
     overflow: hidden;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    background: black;
-    opacity: 0.8;
+    background: #000;
+    /* 增加科技感边框光效 */
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    transition: transform 0.3s ease;
+    transform: scaleX(-1);
+    /* 保持镜像 */
+}
+
+/* 摄像头工作时的呼吸灯效果 */
+.camera-wrapper::after {
+    content: '';
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    /* 镜像后其实在左边 */
+    width: 8px;
+    height: 8px;
+    background: #22c55e;
+    border-radius: 50%;
+    box-shadow: 0 0 8px #22c55e;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% {
+        opacity: 0.5;
+    }
+
+    50% {
+        opacity: 1;
+    }
+
+    100% {
+        opacity: 0.5;
+    }
 }
 
 #webcam,
@@ -335,47 +371,65 @@ onBeforeUnmount(() => {
     object-fit: cover;
 }
 
+/* 状态胶囊 */
 .status-badge {
-    margin-top: 8px;
+    background: rgba(15, 23, 42, 0.8);
+    backdrop-filter: blur(8px);
     color: white;
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 12px;
+    padding: 8px 16px;
+    border-radius: 30px;
+    font-size: 13px;
+    font-weight: 500;
     display: flex;
     align-items: center;
-    gap: 6px;
-    transition: background-color 0.3s;
+    gap: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    transition: all 0.3s;
 }
 
 .status-badge.active {
-    background: rgba(40, 167, 69, 0.8);
+    border-color: rgba(34, 197, 94, 0.5);
+    /* Green border */
 }
 
 .status-badge.drawing-mode {
-    background: rgba(255, 193, 7, 0.9);
-    color: #333;
-    font-weight: bold;
-}
-
-.gesture-hint {
-    margin-top: 4px;
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.8);
-    text-shadow: 1px 1px 2px black;
-    text-align: center;
+    background: rgba(234, 179, 8, 0.9);
+    /* Yellow */
+    color: #0f172a;
+    border-color: transparent;
+    transform: scale(1.05);
 }
 
 .indicator {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background-color: white;
-    box-shadow: 0 0 5px white;
-    transition: background-color 0.2s;
+    background-color: #94a3b8;
+    transition: all 0.2s;
+}
+
+.status-badge.active .indicator {
+    background-color: #22c55e;
+    /* Green */
+    box-shadow: 0 0 8px #22c55e;
 }
 
 .indicator.pinching {
-    background-color: #FF0000;
-    box-shadow: 0 0 8px #FF0000;
+    background-color: #ef4444;
+    /* Red */
+    box-shadow: 0 0 8px #ef4444;
+    transform: scale(1.2);
+}
+
+.gesture-hint {
+    background: rgba(0, 0, 0, 0.6);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.9);
+    text-align: center;
+    margin-top: -4px;
+    backdrop-filter: blur(4px);
 }
 </style>
