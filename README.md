@@ -67,15 +67,10 @@ smart-presentation/
 ├── src/
 │   ├── assets/              # 静态资源与样式
 │   ├── components/
-│   │   ├── Gesture/         # 手势控制核心组件
-│   │   │   └── GestureController.vue
-│   │   ├── Layout/          # 布局组件
-│   │   └── ...
+│   │   └── GestureController.vue         # 手势控制核心组件
 │   ├── router/              # 路由配置
 │   ├── views/               # 页面视图
-│   │   ├── Presentation.vue # 核心演示页面
-│   │   ├── Dashboard.vue    # 文件管理/仪表盘
-│   │   └── Editor.vue       # 编辑器视图
+│   │   └── Presentation.vue # 核心演示页面
 │   ├── App.vue
 │   └── main.ts
 ├── index.html

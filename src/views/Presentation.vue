@@ -61,7 +61,7 @@
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import * as pdfjsLib from 'pdfjs-dist'
 import { Monitor, Close } from '@element-plus/icons-vue'
-import GestureController from '@/components/Gesture/GestureController.vue'
+import GestureController from '@/components/GestureController.vue'
 
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker?url'
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker
