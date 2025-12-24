@@ -5,13 +5,18 @@
             <canvas ref="canvasRef" id="output_canvas"></canvas>
         </div>
 
-        <div class="status-badge active">
-            <div class="indicator"></div>
-            AI 视觉已激活
+        <div class="status-badge" :class="{ 'drawing-mode': isDrawingMode, active: !isDrawingMode }">
+            <div class="indicator" :class="{ 'pinching': isPinching }"></div>
+            {{ getStatusText() }}
         </div>
 
         <div class="gesture-hint">
-            👋 挥手翻页 | ✊ 握拳退出全屏
+            <template v-if="isDrawingMode">
+                👌 捏合书写 | ✋ 张手静止退出
+            </template>
+            <template v-else>
+                👋 挥手翻页 | ☝️ 食指静止开启画板
+            </template>
         </div>
     </div>
 </template>
@@ -20,8 +25,7 @@
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { FilesetResolver, HandLandmarker, DrawingUtils } from '@mediapipe/tasks-vision'
 
-// 定义事件：翻页 和 退出全屏
-const emit = defineEmits(['swipe-left', 'swipe-right', 'exit-fullscreen'])
+const emit = defineEmits(['swipe-left', 'swipe-right', 'exit-fullscreen', 'toggle-drawing', 'update-pointer'])
 
 const videoRef = ref<HTMLVideoElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -29,20 +33,47 @@ let handLandmarker: HandLandmarker | null = null
 let animationFrameId: number
 let lastVideoTime = -1
 
+// --- 状态标志 ---
+const isDrawingMode = ref(false)
+const isPinching = ref(false)
+
 // --- 挥手检测变量 ---
 let lastWristX: number | null = null
 let lastSwipeTime = 0
 const SWIPE_THRESHOLD = 0.15
 const COOLDOWN = 800
 
-// --- 握拳检测变量 ---
+// --- 握拳检测变量 (退出全屏) ---
 let fistHoldStartTime = 0
-const FIST_HOLD_THRESHOLD = 600 // 需要保持握拳 600ms 才会触发退出
+const FIST_HOLD_THRESHOLD = 600
 let isFistDetected = false
 
-// 判断手指弯曲 (屏幕坐标系Y向下，指尖Y > 关节Y 表示弯曲)
+// --- 食指静止检测变量 (开启画板) ---
+let indexHoldStartTime = 0
+let indexHoldStartPos: { x: number, y: number } | null = null
+const INDEX_HOLD_DURATION = 1000 // 开启需静止2秒
+
+// --- 张手静止检测变量 (退出画板 - 新增) ---
+let palmHoldStartTime = 0
+let palmHoldStartPos: { x: number, y: number } | null = null
+const PALM_HOLD_DURATION = 1000 // 退出需静止1秒
+
+// 通用静止容差
+const MOVEMENT_TOLERANCE = 0.05
+
+// --- 平滑滤波变量 ---
+let smoothedX = 0
+let smoothedY = 0
+const SMOOTHING_FACTOR = 0.2
+
+// 判断手指弯曲
 const isFingerCurled = (landmarks: any[], tipIdx: number, jointIdx: number) => {
     return landmarks[tipIdx].y > landmarks[jointIdx].y
+}
+
+const getStatusText = () => {
+    if (!isDrawingMode.value) return 'AI 视觉已激活'
+    return isPinching.value ? '🖊️ 书写中...' : '🔦 激光笔模式'
 }
 
 // MediaPipe 初始化
@@ -57,7 +88,6 @@ const createHandLandmarker = async () => {
     } catch (e) { console.error("MediaPipe 模型加载失败:", e) }
 }
 
-// 开启摄像头
 const startCamera = async () => {
     if (!videoRef.value) return
     try {
@@ -69,11 +99,9 @@ const startCamera = async () => {
     } catch (err) { console.error("无法打开摄像头:", err) }
 }
 
-// 逐帧预测
 const predictWebcam = async () => {
     if (!handLandmarker || !videoRef.value || !canvasRef.value) return
 
-    // 调整画布尺寸匹配视频流
     if (videoRef.value.videoWidth > 0 && canvasRef.value.width !== videoRef.value.videoWidth) {
         canvasRef.value.width = videoRef.value.videoWidth
         canvasRef.value.height = videoRef.value.videoHeight
@@ -90,96 +118,184 @@ const predictWebcam = async () => {
 
         if (results.landmarks && results.landmarks.length > 0) {
             const landmarks = results.landmarks[0]
-
-            // 绘制手部骨架
             const drawingUtils = new DrawingUtils(ctx)
-            drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, { color: "#00FF00", lineWidth: 3 })
+
+            // 视觉反馈颜色
+            let connectorColor = "#00FF00"
+            if (isDrawingMode.value) connectorColor = "#00FFFF"
+            if (isPinching.value) connectorColor = "#FF0000"
+
+            drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, { color: connectorColor, lineWidth: 3 })
             drawingUtils.drawLandmarks(landmarks, { color: "#FF0000", lineWidth: 1 })
 
-            // 执行手势检测逻辑
             detectGestures(landmarks)
         } else {
-            // 没有检测到手时，重置状态
-            lastWristX = null
-            fistHoldStartTime = 0
-            isFistDetected = false
+            resetStates()
         }
     }
     animationFrameId = window.requestAnimationFrame(predictWebcam)
 }
 
+const resetStates = () => {
+    lastWristX = null
+    fistHoldStartTime = 0
+    isFistDetected = false
+    indexHoldStartTime = 0
+    indexHoldStartPos = null
+    palmHoldStartTime = 0
+    palmHoldStartPos = null
+    isPinching.value = false
+}
+
 const detectGestures = (landmarks: any) => {
     const now = Date.now()
     const wrist = landmarks[0]
+    const indexTip = landmarks[8]
+    const thumbTip = landmarks[4]
 
-    // =========================================
-    // 逻辑 1: 挥手检测 (翻页) - 握拳时禁用
-    // =========================================
-    if (!isFistDetected && now - lastSwipeTime > COOLDOWN) {
-        if (lastWristX !== null) {
-            const delta = wrist.x - lastWristX
-            if (Math.abs(delta) > SWIPE_THRESHOLD) {
-                if (delta < 0) {
-                    emit('swipe-left') // Next Page
-                } else {
-                    emit('swipe-right') // Prev Page
-                }
-                lastSwipeTime = now
-                lastWristX = null
-            }
-        }
-        if (!lastWristX) lastWristX = wrist.x
-        else lastWristX = lastWristX * 0.9 + wrist.x * 0.1 // 简单的平滑滤波
-    }
-
-    // =========================================
-    // 逻辑 2: 握拳检测 (退出全屏)
-    // =========================================
-
-    // 检测四指是否弯曲 (忽略大拇指)
+    // 检测手指状态
     const fingersCurled = [
         isFingerCurled(landmarks, 8, 6),   // 食指
         isFingerCurled(landmarks, 12, 10), // 中指
         isFingerCurled(landmarks, 16, 14), // 无名指
         isFingerCurled(landmarks, 20, 18)  // 小指
     ]
-    const curledCount = fingersCurled.filter(c => c).length
 
-    // 判定为拳头：至少4根手指弯曲
-    if (curledCount === 4) {
-        if (fistHoldStartTime === 0) {
-            fistHoldStartTime = now // 开始计时
-        } else if (now - fistHoldStartTime > FIST_HOLD_THRESHOLD) {
-            // 保持拳头超过设定时间，触发退出
-            if (!isFistDetected) {
-                console.log("✊ [触发] 握拳退出全屏")
-                emit('exit-fullscreen')
-                isFistDetected = true // 锁定状态，防止重复触发
+    // 姿态判定
+    const isFist = fingersCurled.every(c => c) // 握拳：4指全弯
+    const isIndexOnly = !fingersCurled[0] && fingersCurled[1] && fingersCurled[2] && fingersCurled[3] // 仅食指
+    const isPalmOpen = !fingersCurled[0] && !fingersCurled[1] && !fingersCurled[2] && !fingersCurled[3] // 张手：4指全直
+
+    // =========================================
+    // 逻辑 A: 画板模式 (Exit via Palm Open)
+    // =========================================
+    if (isDrawingMode.value) {
+
+        // 1. 张开手掌静止退出 (替代握拳)
+        if (isPalmOpen) {
+            isPinching.value = false // 强制打断捏合
+
+            if (palmHoldStartTime === 0) {
+                palmHoldStartTime = now
+                palmHoldStartPos = { x: wrist.x, y: wrist.y } // 记录手腕位置作为参考
+            } else {
+                // 计算抖动距离
+                const dist = Math.hypot(wrist.x - palmHoldStartPos!.x, wrist.y - palmHoldStartPos!.y)
+
+                if (dist > MOVEMENT_TOLERANCE) {
+                    // 动了，重置
+                    palmHoldStartTime = now
+                    palmHoldStartPos = { x: wrist.x, y: wrist.y }
+                } else if (now - palmHoldStartTime > PALM_HOLD_DURATION) {
+                    // 静止满足时间，触发退出
+                    console.log("✋ [触发] 退出画板")
+                    isDrawingMode.value = false
+                    emit('toggle-drawing', false)
+                    palmHoldStartTime = 0
+                }
             }
+        } else {
+            palmHoldStartTime = 0
+            palmHoldStartPos = null
+
+            // 2. 激光笔 & 书写逻辑 (非张手状态下)
+            // 捏合检测
+            const pinchDist = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y)
+            const PINCH_THRESHOLD = 0.1
+            const nowPinching = pinchDist < PINCH_THRESHOLD
+
+            isPinching.value = nowPinching
+
+            // 坐标平滑
+            const targetX = 1 - indexTip.x
+            const targetY = indexTip.y
+
+            if (smoothedX === 0 && smoothedY === 0) {
+                smoothedX = targetX
+                smoothedY = targetY
+            } else {
+                smoothedX += (targetX - smoothedX) * SMOOTHING_FACTOR
+                smoothedY += (targetY - smoothedY) * SMOOTHING_FACTOR
+            }
+
+            emit('update-pointer', {
+                x: smoothedX,
+                y: smoothedY,
+                isDrawing: nowPinching
+            })
         }
-    } else {
-        // 手指张开，立即重置计时器
-        fistHoldStartTime = 0
-        isFistDetected = false
+    }
+    // =========================================
+    // 逻辑 B: 普通模式 (Enter via Index, Exit via Fist)
+    // =========================================
+    else {
+        // 重置画板相关的计时器
+        palmHoldStartTime = 0
+
+        // 1. 食指静止开启画板
+        if (isIndexOnly) {
+            if (indexHoldStartTime === 0) {
+                indexHoldStartTime = now
+                indexHoldStartPos = { x: indexTip.x, y: indexTip.y }
+            } else {
+                const dist = Math.hypot(indexTip.x - indexHoldStartPos!.x, indexTip.y - indexHoldStartPos!.y)
+                if (dist > MOVEMENT_TOLERANCE) {
+                    indexHoldStartTime = now
+                    indexHoldStartPos = { x: indexTip.x, y: indexTip.y }
+                } else if (now - indexHoldStartTime > INDEX_HOLD_DURATION) {
+                    console.log("☝️ [触发] 开启画板")
+                    isDrawingMode.value = true
+                    // 初始化坐标，防止跳跃
+                    smoothedX = 1 - indexTip.x
+                    smoothedY = indexTip.y
+                    emit('toggle-drawing', true)
+                    indexHoldStartTime = 0
+                }
+            }
+        } else {
+            indexHoldStartTime = 0
+            indexHoldStartPos = null
+        }
+
+        // 2. 挥手翻页 (非握拳)
+        if (!isFist && !isIndexOnly && now - lastSwipeTime > COOLDOWN) {
+            if (lastWristX !== null) {
+                const delta = wrist.x - lastWristX
+                if (Math.abs(delta) > SWIPE_THRESHOLD) {
+                    if (delta < 0) emit('swipe-left')
+                    else emit('swipe-right')
+                    lastSwipeTime = now
+                    lastWristX = null
+                }
+            }
+            if (!lastWristX) lastWristX = wrist.x
+            else lastWristX = lastWristX * 0.9 + wrist.x * 0.1
+        }
+
+        // 3. 握拳退出全屏
+        if (isFist) {
+            if (fistHoldStartTime === 0) fistHoldStartTime = now
+            else if (now - fistHoldStartTime > FIST_HOLD_THRESHOLD) {
+                if (!isFistDetected) {
+                    console.log("✊ [触发] 退出全屏")
+                    emit('exit-fullscreen')
+                    isFistDetected = true
+                }
+            }
+        } else {
+            fistHoldStartTime = 0
+            isFistDetected = false
+        }
     }
 }
 
-// 组件挂载：启动
-onMounted(() => {
-    createHandLandmarker()
-})
+onMounted(() => { createHandLandmarker() })
 
-// 组件卸载：清理 (关键步骤)
 onBeforeUnmount(() => {
-    // 1. 停止动画帧循环
     cancelAnimationFrame(animationFrameId)
-
-    // 2. 彻底关闭摄像头硬件流 (熄灭指示灯)
     if (videoRef.value && videoRef.value.srcObject) {
         const stream = videoRef.value.srcObject as MediaStream
-        stream.getTracks().forEach(track => {
-            track.stop()
-        })
+        stream.getTracks().forEach(track => track.stop())
         videoRef.value.srcObject = null
     }
     handLandmarker = null
@@ -193,7 +309,6 @@ onBeforeUnmount(() => {
     right: 20px;
     z-index: 9999;
     pointer-events: none;
-    /* 确保不遮挡PPT内容点击 */
     display: flex;
     flex-direction: column;
     align-items: flex-end;
@@ -222,7 +337,6 @@ onBeforeUnmount(() => {
 
 .status-badge {
     margin-top: 8px;
-    background: rgba(40, 167, 69, 0.8);
     color: white;
     padding: 4px 10px;
     border-radius: 4px;
@@ -230,6 +344,17 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     gap: 6px;
+    transition: background-color 0.3s;
+}
+
+.status-badge.active {
+    background: rgba(40, 167, 69, 0.8);
+}
+
+.status-badge.drawing-mode {
+    background: rgba(255, 193, 7, 0.9);
+    color: #333;
+    font-weight: bold;
 }
 
 .gesture-hint {
@@ -246,5 +371,11 @@ onBeforeUnmount(() => {
     border-radius: 50%;
     background-color: white;
     box-shadow: 0 0 5px white;
+    transition: background-color 0.2s;
+}
+
+.indicator.pinching {
+    background-color: #FF0000;
+    box-shadow: 0 0 8px #FF0000;
 }
 </style>

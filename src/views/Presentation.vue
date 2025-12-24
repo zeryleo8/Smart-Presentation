@@ -36,14 +36,24 @@
                     {{ currentPage }} / {{ totalPages }}
                 </div>
 
+                <div class="drawing-tip" v-if="isDrawingMode">
+                    🔦 激光笔已激活：捏合手指书写，张开手掌静止退出
+                </div>
+
+                <div v-if="isDrawingMode" class="laser-pointer" :class="{ 'drawing': isDrawingAction }"
+                    :style="{ left: pointerX + 'px', top: pointerY + 'px' }">
+                </div>
+
                 <div class="slide-wrapper" :style="slideStyle">
                     <canvas ref="mainCanvasRef"></canvas>
+                    <canvas ref="drawingCanvasRef" class="drawing-canvas" v-show="isDrawingMode"></canvas>
                 </div>
             </div>
         </div>
 
         <GestureController v-if="isFullscreen" @swipe-left="nextPage" @swipe-right="prevPage"
-            @exit-fullscreen="exitFullscreen" />
+            @exit-fullscreen="exitFullscreen" @toggle-drawing="handleToggleDrawing"
+            @update-pointer="handlePointerUpdate" />
     </div>
 </template>
 
@@ -53,18 +63,25 @@ import * as pdfjsLib from 'pdfjs-dist'
 import { Monitor, Close } from '@element-plus/icons-vue'
 import GestureController from '@/components/Gesture/GestureController.vue'
 
-// 配置 PDF Worker
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker?url'
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker
 
 // --- 状态变量 ---
 const loading = ref(false)
 const isFullscreen = ref(false)
+const isDrawingMode = ref(false)
 const fileName = ref('')
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const containerRef = ref<HTMLElement | null>(null)
 const stageRef = ref<HTMLElement | null>(null)
 const mainCanvasRef = ref<HTMLCanvasElement | null>(null)
+const drawingCanvasRef = ref<HTMLCanvasElement | null>(null)
+
+// 激光笔状态
+const isDrawingAction = ref(false)
+const pointerX = ref(0)
+const pointerY = ref(0)
+let lastDrawPos: { x: number, y: number } | null = null
 
 // PDF 数据
 let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null
@@ -75,7 +92,67 @@ let currentRenderTask: any = null
 
 const GOTENBERG_URL = '/api-gotenberg/forms/libreoffice/convert'
 
-// --- PDF 渲染逻辑 (保持不变) ---
+// --- 画板与激光笔逻辑 ---
+const handleToggleDrawing = (active: boolean) => {
+    isDrawingMode.value = active
+    if (active) {
+        initDrawingCanvas()
+    } else {
+        const ctx = drawingCanvasRef.value?.getContext('2d')
+        ctx?.clearRect(0, 0, drawingCanvasRef.value!.width, drawingCanvasRef.value!.height)
+        lastDrawPos = null
+    }
+}
+
+const initDrawingCanvas = () => {
+    if (!drawingCanvasRef.value || !mainCanvasRef.value) return
+    drawingCanvasRef.value.width = mainCanvasRef.value.width
+    drawingCanvasRef.value.height = mainCanvasRef.value.height
+
+    const ctx = drawingCanvasRef.value.getContext('2d')
+    if (ctx) {
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+        ctx.lineWidth = 4
+        ctx.strokeStyle = '#FF0000'
+    }
+}
+
+const handlePointerUpdate = (data: { x: number, y: number, isDrawing: boolean }) => {
+    if (!isDrawingMode.value || !stageRef.value || !drawingCanvasRef.value) return
+
+    const stageRect = stageRef.value.getBoundingClientRect()
+    const targetX = data.x * stageRect.width
+    const targetY = data.y * stageRect.height
+
+    pointerX.value = targetX
+    pointerY.value = targetY
+    isDrawingAction.value = data.isDrawing
+
+    const canvas = drawingCanvasRef.value
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    if (data.isDrawing) {
+        const canvasRect = canvas.getBoundingClientRect()
+        const globalX = stageRect.left + targetX
+        const globalY = stageRect.top + targetY
+        const canvasX = globalX - canvasRect.left
+        const canvasY = globalY - canvasRect.top
+
+        if (lastDrawPos) {
+            ctx.beginPath()
+            ctx.moveTo(lastDrawPos.x, lastDrawPos.y)
+            ctx.lineTo(canvasX, canvasY)
+            ctx.stroke()
+        }
+        lastDrawPos = { x: canvasX, y: canvasY }
+    } else {
+        lastDrawPos = null
+    }
+}
+
+// --- 文件处理 & PDF 渲染 (保持原有逻辑) ---
 const renderPageToCanvas = async (pageNumber: number, canvas: HTMLCanvasElement, fitToContainer: HTMLElement | null = null) => {
     if (!pdfDoc) return
     const page = await pdfDoc.getPage(pageNumber)
@@ -113,9 +190,10 @@ const renderPageToCanvas = async (pageNumber: number, canvas: HTMLCanvasElement,
     const task = page.render(renderContext as any)
     if (fitToContainer) currentRenderTask = task
     await task.promise
+
+    if (isDrawingMode.value) initDrawingCanvas()
 }
 
-// --- 文件处理逻辑 (保持不变) ---
 const triggerUpload = () => fileInputRef.value?.click()
 
 const handleFileChange = async (event: Event) => {
@@ -149,10 +227,7 @@ const convertPPTX = async (file: File) => {
 
 const loadPdf = async (data: ArrayBuffer) => {
     if (pdfDoc) pdfDoc.destroy()
-    const loadingTask = pdfjsLib.getDocument({
-        data: data,
-        verbosity: 0
-    })
+    const loadingTask = pdfjsLib.getDocument({ data: data, verbosity: 0 })
     pdfDoc = await loadingTask.promise
     totalPages.value = pdfDoc.numPages
     currentPage.value = 1
@@ -176,7 +251,6 @@ const renderThumbnails = async () => {
     }
 }
 
-// --- 交互逻辑 ---
 const jumpToPage = (p: number) => {
     if (p === currentPage.value) return
     currentPage.value = p
@@ -185,7 +259,6 @@ const jumpToPage = (p: number) => {
 const nextPage = () => { if (currentPage.value < totalPages.value) jumpToPage(currentPage.value + 1) }
 const prevPage = () => { if (currentPage.value > 1) jumpToPage(currentPage.value - 1) }
 
-// --- 全屏管理 ---
 const toggleFullscreen = () => {
     if (!containerRef.value) return
     if (!document.fullscreenElement) {
@@ -199,10 +272,10 @@ const exitFullscreen = () => {
     if (document.fullscreenElement) document.exitFullscreen()
 }
 
-// 监听原生全屏变化（处理 ESC 键）
 const onFullscreenChange = () => {
     isFullscreen.value = !!document.fullscreenElement
-    setTimeout(() => renderMain(), 200) // 重绘以适应尺寸
+    if (!isFullscreen.value) handleToggleDrawing(false)
+    setTimeout(() => renderMain(), 200)
 }
 
 const onWindowResize = () => {
@@ -222,7 +295,8 @@ onBeforeUnmount(() => {
 
 const slideStyle = reactive({
     boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
-    borderRadius: '4px'
+    borderRadius: '4px',
+    position: 'relative' as const
 })
 </script>
 
@@ -353,7 +427,54 @@ const slideStyle = reactive({
     z-index: 1000;
 }
 
+.drawing-tip {
+    position: absolute;
+    top: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(255, 193, 7, 0.9);
+    color: #333;
+    padding: 8px 20px;
+    border-radius: 20px;
+    font-weight: bold;
+    z-index: 1000;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+}
+
+.laser-pointer {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    background: rgba(255, 0, 0, 0.5);
+    border: 2px solid rgba(255, 255, 255, 0.8);
+    border-radius: 50%;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    z-index: 9999;
+    box-shadow: 0 0 10px rgba(255, 0, 0, 0.8);
+    transition: width 0.15s, height 0.15s, background-color 0.15s;
+
+    &.drawing {
+        width: 10px;
+        height: 10px;
+        background: rgba(255, 0, 0, 1);
+        border-color: #FFFF00;
+        box-shadow: 0 0 5px rgba(255, 0, 0, 1);
+    }
+}
+
 .slide-wrapper {
     line-height: 0;
+    position: relative;
+}
+
+.drawing-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    pointer-events: none;
 }
 </style>
