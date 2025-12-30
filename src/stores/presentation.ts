@@ -1,15 +1,15 @@
-// src/stores/presentation.ts
 import { defineStore } from 'pinia'
 import { ref, markRaw } from 'vue'
 import * as pdfjsLib from 'pdfjs-dist'
 
-// 设置 Worker (只需设置一次)
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker?url'
+// 设置 Worker
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker
 
 export const usePresentationStore = defineStore('presentation', () => {
     // State
     const pdfDoc = ref<pdfjsLib.PDFDocumentProxy | null>(null)
+    const pdfSource = ref<ArrayBuffer | null>(null) // 新增：存储源文件数据
     const fileName = ref('')
     const isLoading = ref(false)
     const loadingText = ref('正在处理...')
@@ -19,8 +19,6 @@ export const usePresentationStore = defineStore('presentation', () => {
 
     // Actions
     const setPdfDoc = (doc: pdfjsLib.PDFDocumentProxy) => {
-        // 关键点：使用 markRaw 标记 pdfDoc，避免 Vue 对其进行深度响应式转换，
-        // 否则在操作大文件时会导致严重的性能卡顿或内存溢出。
         pdfDoc.value = markRaw(doc)
     }
 
@@ -29,6 +27,7 @@ export const usePresentationStore = defineStore('presentation', () => {
             pdfDoc.value.destroy()
         }
         pdfDoc.value = null
+        pdfSource.value = null
         fileName.value = ''
     }
 
@@ -44,7 +43,7 @@ export const usePresentationStore = defineStore('presentation', () => {
         try {
             isLoading.value = true
             fileName.value = file.name
-            resetStore() // 清理旧数据
+            resetStore()
 
             let arrayBuffer: ArrayBuffer
             
@@ -56,7 +55,11 @@ export const usePresentationStore = defineStore('presentation', () => {
                 arrayBuffer = await convertPPTX(file)
             }
 
-            loadingText.value = '正在渲染文档...'
+            // 保存源数据供 vue-pdf-embed 使用
+            pdfSource.value = arrayBuffer
+
+            loadingText.value = '正在预加载文档结构...'
+            // 仍然保留 pdfjsLib 解析以获取总页数等元数据
             const loadingTask = pdfjsLib.getDocument({ 
                 data: arrayBuffer, 
                 verbosity: 0 
@@ -65,10 +68,10 @@ export const usePresentationStore = defineStore('presentation', () => {
             const doc = await loadingTask.promise
             setPdfDoc(doc)
             
-            return true // 成功
+            return true
         } catch (error) {
             console.error('文件加载失败:', error)
-            fileName.value = '' // 重置文件名
+            fileName.value = ''
             throw error
         } finally {
             isLoading.value = false
@@ -77,6 +80,7 @@ export const usePresentationStore = defineStore('presentation', () => {
 
     return {
         pdfDoc,
+        pdfSource,
         fileName,
         isLoading,
         loadingText,

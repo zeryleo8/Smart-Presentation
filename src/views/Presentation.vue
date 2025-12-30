@@ -1,5 +1,5 @@
 <template>
-    <div class="presentation-container" ref="containerRef" :class="{ 'is-fullscreen': isFullscreen }">
+    <div class="presentation-container" :class="{ 'is-fullscreen': isFullscreen }">
 
         <div class="header" v-show="!isFullscreen">
             <div class="left">
@@ -14,545 +14,405 @@
         </div>
 
         <div class="main-content">
-
             <div class="sidebar" v-show="!isFullscreen">
                 <div v-for="page in totalPages" :key="page" class="thumbnail-wrapper"
-                    :class="{ active: currentPage === page }" @click="jumpToPage(page)">
-                    <div class="thumb-box">
-                        <canvas :ref="el => setThumbRef(el as HTMLCanvasElement, page)" class="thumb-canvas"></canvas>
-                    </div>
+                    :class="{ active: currentPage === page }" @click="slideTo(page)">
+                    <div class="thumb-number">{{ page }}</div>
+                    <VuePdfEmbed v-if="store.pdfSource" :source="store.pdfSource" :page="page" :width="200" />
                 </div>
             </div>
 
-            <div class="stage" ref="stageRef">
-                <div class="fullscreen-exit-btn" v-if="isFullscreen" @click="exitFullscreen">
-                    <el-icon>
-                        <Close />
-                    </el-icon> 退出演示 (关闭摄像头)
-                </div>
+            <div class="stage-area" ref="stageContainerRef">
+                <swiper
+                    v-if="store.pdfSource"
+                    :modules="modules"
+                    :slides-per-view="1"
+                    :space-between="20"
+                    :virtual="true"
+                    :keyboard="{ enabled: true }"
+                    effect="fade"
+                    @swiper="onSwiperInit"
+                    @slideChange="onSlideChange"
+                    class="my-swiper"
+                >
+                    <swiper-slide v-for="pageIndex in totalPages" :key="pageIndex" :virtualIndex="pageIndex">
+                        <div class="slide-content">
+                            <div class="layer-wrapper" :style="{ width: slideWidth + 'px', height: slideHeight + 'px' }">
+                                
+                                <VuePdfEmbed 
+                                    :source="store.pdfSource" 
+                                    :page="pageIndex" 
+                                    class="pdf-layer"
+                                    :width="slideWidth"
+                                    :height="slideHeight"
+                                />
 
-                <div class="fullscreen-page-indicator" v-if="isFullscreen">
-                    {{ currentPage }} / {{ totalPages }}
-                </div>
+                                <div class="konva-wrapper">
+                                    <v-stage :config="stageConfig">
+                                        <v-layer>
+                                            <v-line v-for="(line, i) in (drawings[pageIndex] || [])" :key="i" :config="line" />
+                                            <v-line v-if="isDrawingAction && currentPage === pageIndex" :config="currentLineConfig" />
+                                            <v-circle v-if="isDrawingMode && currentPage === pageIndex" :config="pointerConfig" />
+                                        </v-layer>
+                                    </v-stage>
+                                </div>
+                            </div>
 
-                <div class="drawing-tip" v-if="isDrawingMode">
-                    🔦 激光笔已激活：捏合手指书写，张开手掌静止退出
-                </div>
+                        </div>
+                    </swiper-slide>
+                </swiper>
 
-                <div v-if="isDrawingMode" class="laser-pointer" :class="{ 'drawing': isDrawingAction }"
-                    :style="{ left: pointerX + 'px', top: pointerY + 'px' }">
-                </div>
-
-                <div class="slide-wrapper" :style="slideStyle">
-                    <canvas ref="mainCanvasRef"></canvas>
-                    <canvas ref="drawingCanvasRef" class="drawing-canvas" v-show="isDrawingMode"></canvas>
+                <div class="fullscreen-ui" v-if="isFullscreen">
+                    <div class="indicator">{{ currentPage }} / {{ totalPages }}</div>
+                    <div class="exit-btn" @click="exitFullscreen">
+                        <el-icon><Close /></el-icon> 退出
+                    </div>
+                    <div class="drawing-tip" v-if="isDrawingMode">
+                        🖊️ 画板模式：捏合手指书写 | 张开手掌停止
+                    </div>
                 </div>
             </div>
         </div>
 
-        <GestureController v-if="isFullscreen" @swipe-left="nextPage" @swipe-right="prevPage"
-            @exit-fullscreen="exitFullscreen" @toggle-drawing="handleToggleDrawing"
-            @update-pointer="handlePointerUpdate" />
+        <GestureController v-if="isFullscreen" 
+            @swipe-left="nextPage" 
+            @swipe-right="prevPage"
+            @exit-fullscreen="exitFullscreen" 
+            @toggle-drawing="handleToggleDrawing"
+            @update-pointer="handlePointerUpdate" 
+        />
     </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Monitor, Close, Back } from '@element-plus/icons-vue'
-import GestureController from '@/components/GestureController.vue'
 import { usePresentationStore } from '@/stores/presentation'
+import GestureController from '@/components/GestureController.vue'
+import { Swiper, SwiperSlide } from 'swiper/vue'
+import { Navigation, Keyboard, Virtual, EffectFade } from 'swiper/modules'
+import VuePdfEmbed from 'vue-pdf-embed'
 
+// 引入样式
+import 'swiper/css'
+import 'swiper/css/effect-fade'
+import 'swiper/css/virtual'
+
+const modules = [Navigation, Keyboard, Virtual, EffectFade]
 const router = useRouter()
 const store = usePresentationStore()
 
-// --- 状态变量 ---
+// 状态
 const isFullscreen = ref(false)
-const isDrawingMode = ref(false)
-const fileName = ref(store.fileName)
-
-// DOM 引用
-const containerRef = ref<HTMLElement | null>(null)
-const stageRef = ref<HTMLElement | null>(null)
-const mainCanvasRef = ref<HTMLCanvasElement | null>(null)
-const drawingCanvasRef = ref<HTMLCanvasElement | null>(null)
-const thumbRefs = ref<Record<number, HTMLCanvasElement>>({})
-
-// PDF 状态
 const currentPage = ref(1)
-const totalPages = ref(0)
-let currentRenderTask: any = null
+const totalPages = computed(() => store.pdfDoc?.numPages || 0)
+const fileName = computed(() => store.fileName)
+const swiperRef = ref<any>(null)
+const stageContainerRef = ref<HTMLElement | null>(null)
 
-// 激光笔状态
+// 尺寸计算状态
+const slideWidth = ref(0)
+const slideHeight = ref(0)
+const pdfAspectRatio = ref(0) // PDF 页面的宽高比
+
+// 绘图状态
+const isDrawingMode = ref(false)
 const isDrawingAction = ref(false)
-const pointerX = ref(0)
-const pointerY = ref(0)
-let lastDrawPos: { x: number, y: number } | null = null
+const drawings = ref<Record<number, any[]>>({})
+const currentLine = ref<number[]>([])
+const pointerPos = ref({ x: 0, y: 0 })
 
-// --- 生命周期 ---
 onMounted(async () => {
-    // 核心检查：如果 Store 中没有 PDF 对象（例如用户刷新了页面），回退到首页
-    if (!store.pdfDoc) {
+    if (!store.pdfSource) {
         router.replace('/')
         return
     }
-
-    totalPages.value = store.pdfDoc.numPages
-    currentPage.value = 1
-
-    await renderMain()
-    // 延迟渲染缩略图，优先保证主屏加载
-    setTimeout(renderThumbnails, 100)
-
-    document.addEventListener('fullscreenchange', onFullscreenChange)
-    window.addEventListener('resize', onWindowResize)
+    await initPdfParams()
+    window.addEventListener('resize', updateDimensions)
 })
 
-onBeforeUnmount(() => {
-    document.removeEventListener('fullscreenchange', onFullscreenChange)
-    window.removeEventListener('resize', onWindowResize)
-    // 离开页面时清理 Store，或者根据需求保留
-    // store.resetStore() 
+onUnmounted(() => {
+    window.removeEventListener('resize', updateDimensions)
 })
 
-// --- 导航逻辑 ---
 const goHome = () => {
     store.resetStore()
     router.push('/')
 }
 
-const jumpToPage = (p: number) => {
-    if (p === currentPage.value) return
-    currentPage.value = p
-    renderMain()
-}
-
-const nextPage = () => {
-    if (currentPage.value < totalPages.value) jumpToPage(currentPage.value + 1)
-}
-
-const prevPage = () => {
-    if (currentPage.value > 1) jumpToPage(currentPage.value - 1)
-}
-
-// --- PDF 渲染逻辑 ---
-const renderPageToCanvas = async (pageNumber: number, canvas: HTMLCanvasElement, fitToContainer: HTMLElement | null = null) => {
+// --- 初始化 PDF 参数 (获取真实比例) ---
+const initPdfParams = async () => {
     if (!store.pdfDoc) return
-    const page = await store.pdfDoc.getPage(pageNumber)
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const dpr = window.devicePixelRatio || 1
-    const viewportRaw = page.getViewport({ scale: 1 })
-    let scale = 1
-
-    if (fitToContainer) {
-        // 适配容器大小，留出一点边距
-        const containerW = fitToContainer.clientWidth - 40
-        const containerH = fitToContainer.clientHeight - 40
-        const scaleW = containerW / viewportRaw.width
-        const scaleH = containerH / viewportRaw.height
-        scale = Math.min(scaleW, scaleH)
-    } else {
-        // 缩略图固定宽度比例
-        scale = 200 / viewportRaw.width
-    }
-
-    const finalViewport = page.getViewport({ scale: scale })
-    
-    // 设置 Canvas 尺寸（高清屏适配）
-    canvas.width = Math.floor(finalViewport.width * dpr)
-    canvas.height = Math.floor(finalViewport.height * dpr)
-    canvas.style.width = `${Math.floor(finalViewport.width)}px`
-    canvas.style.height = `${Math.floor(finalViewport.height)}px`
-
-    const renderContext = {
-        canvasContext: ctx,
-        viewport: finalViewport,
-        transform: [dpr, 0, 0, dpr, 0, 0], // CSS 缩放矩阵
-        canvas: ctx.canvas
-    }
-
-    // 如果是主屏渲染，取消上一次未完成的任务
-    if (fitToContainer && currentRenderTask) {
-        currentRenderTask.cancel()
-    }
-
-    const task = page.render(renderContext as any)
-    
-    if (fitToContainer) {
-        currentRenderTask = task
-    }
-
     try {
-        await task.promise
-    } catch (e: any) {
-        if (e.name !== 'RenderingCancelledException') {
-            console.error(e)
-        }
-    }
-
-    // 如果处于画板模式，重置画板层尺寸
-    if (fitToContainer && isDrawingMode.value) {
-        initDrawingCanvas()
+        const page = await store.pdfDoc.getPage(1)
+        const viewport = page.getViewport({ scale: 1 })
+        pdfAspectRatio.value = viewport.width / viewport.height
+        updateDimensions()
+    } catch (e) {
+        console.error("无法获取页面尺寸", e)
     }
 }
 
-const renderMain = async () => {
-    if (!mainCanvasRef.value || !stageRef.value) return
-    await renderPageToCanvas(currentPage.value, mainCanvasRef.value, stageRef.value)
-}
-
-const renderThumbnails = async () => {
-    for (let i = 1; i <= totalPages.value; i++) {
-        const canvas = thumbRefs.value[i]
-        if (canvas) renderPageToCanvas(i, canvas)
-    }
-}
-
-const setThumbRef = (el: HTMLCanvasElement, page: number) => {
-    if (el) thumbRefs.value[page] = el
-}
-
-// --- 全屏逻辑 ---
-const toggleFullscreen = () => {
-    if (!containerRef.value) return
-    if (!document.fullscreenElement) {
-        containerRef.value.requestFullscreen().catch(err => console.error(err))
+// --- 尺寸计算 (防止截断) ---
+const updateDimensions = () => {
+    if (!stageContainerRef.value || pdfAspectRatio.value === 0) return
+    
+    const { clientWidth, clientHeight } = stageContainerRef.value
+    const containerRatio = clientWidth / clientHeight
+    
+    // 如果 PPT 比容器更“扁”（宽），则以容器宽度为基准
+    if (pdfAspectRatio.value > containerRatio) {
+        slideWidth.value = clientWidth
+        slideHeight.value = clientWidth / pdfAspectRatio.value
     } else {
-        document.exitFullscreen()
+        // 如果 PPT 比容器更“方”（高），则以容器高度为基准
+        slideHeight.value = clientHeight
+        slideWidth.value = clientHeight * pdfAspectRatio.value
+    }
+}
+
+// --- Swiper ---
+const onSwiperInit = (swiper: any) => swiperRef.value = swiper
+const onSlideChange = (swiper: any) => currentPage.value = swiper.realIndex + 1
+const slideTo = (page: number) => swiperRef.value?.slideTo(page - 1)
+const nextPage = () => swiperRef.value?.slideNext()
+const prevPage = () => swiperRef.value?.slidePrev()
+
+// --- 全屏 ---
+const toggleFullscreen = () => {
+    const elem = document.documentElement
+    if (!document.fullscreenElement) {
+        elem.requestFullscreen().then(() => {
+            isFullscreen.value = true
+            setTimeout(updateDimensions, 500)
+        })
+    } else {
+        exitFullscreen()
     }
 }
 
 const exitFullscreen = () => {
     if (document.fullscreenElement) document.exitFullscreen()
+    isFullscreen.value = false
+    isDrawingMode.value = false
+    setTimeout(updateDimensions, 300)
 }
 
-const onFullscreenChange = () => {
-    isFullscreen.value = !!document.fullscreenElement
-    // 退出全屏时关闭画板
-    if (!isFullscreen.value) handleToggleDrawing(false)
-    // 重新计算布局渲染
-    setTimeout(() => renderMain(), 200)
-}
+// --- Konva 配置 ---
+const stageConfig = computed(() => ({
+    width: slideWidth.value,
+    height: slideHeight.value
+}))
 
-const onWindowResize = () => {
-    if (currentRenderTask) return
-    renderMain()
-}
+const pointerConfig = computed(() => ({
+    x: pointerPos.value.x,
+    y: pointerPos.value.y,
+    radius: isDrawingAction.value ? 4 : 8,
+    fill: '#ef4444',
+    opacity: 0.8,
+    shadowBlur: 5,
+    shadowColor: '#ef4444'
+}))
 
-// --- 画板与激光笔逻辑 ---
+const currentLineConfig = computed(() => ({
+    points: currentLine.value,
+    stroke: '#ef4444',
+    strokeWidth: 4,
+    tension: 0.5,
+    lineCap: 'round',
+    lineJoin: 'round'
+}))
+
+// --- 手势与绘图 ---
 const handleToggleDrawing = (active: boolean) => {
     isDrawingMode.value = active
-    if (active) {
-        initDrawingCanvas()
-    } else {
-        const ctx = drawingCanvasRef.value?.getContext('2d')
-        ctx?.clearRect(0, 0, drawingCanvasRef.value!.width, drawingCanvasRef.value!.height)
-        lastDrawPos = null
-    }
-}
-
-const initDrawingCanvas = () => {
-    if (!drawingCanvasRef.value || !mainCanvasRef.value) return
-    // 保持画板与主 Canvas 像素一致
-    drawingCanvasRef.value.width = mainCanvasRef.value.width
-    drawingCanvasRef.value.height = mainCanvasRef.value.height
-    
-    const ctx = drawingCanvasRef.value.getContext('2d')
-    if (ctx) {
-        ctx.lineCap = 'round'
-        ctx.lineJoin = 'round'
-        ctx.lineWidth = 5
-        ctx.strokeStyle = '#ef4444' // 红色笔迹
-        ctx.shadowBlur = 2
-        ctx.shadowColor = '#ef4444'
+    if (!active) {
+        isDrawingAction.value = false
+        currentLine.value = []
     }
 }
 
 const handlePointerUpdate = (data: { x: number, y: number, isDrawing: boolean }) => {
-    if (!isDrawingMode.value || !stageRef.value || !drawingCanvasRef.value) return
+    if (!isDrawingMode.value) return
 
-    const stageRect = stageRef.value.getBoundingClientRect()
-    // 计算相对于 Stage 的坐标
-    const targetX = data.x * stageRect.width
-    const targetY = data.y * stageRect.height
+    const absX = data.x * slideWidth.value
+    const absY = data.y * slideHeight.value
 
-    pointerX.value = targetX
-    pointerY.value = targetY
-    isDrawingAction.value = data.isDrawing
-
-    const canvas = drawingCanvasRef.value
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+    pointerPos.value = { x: absX, y: absY }
 
     if (data.isDrawing) {
-        const canvasRect = canvas.getBoundingClientRect()
-        // 转换全局坐标到 Canvas 内部坐标
-        const globalX = stageRect.left + targetX
-        const globalY = stageRect.top + targetY
-        const canvasX = globalX - canvasRect.left
-        const canvasY = globalY - canvasRect.top
-
-        // 绘制线条
-        if (lastDrawPos) {
-            ctx.beginPath()
-            ctx.moveTo(lastDrawPos.x, lastDrawPos.y)
-            ctx.lineTo(canvasX, canvasY)
-            ctx.stroke()
+        if (!isDrawingAction.value) {
+            isDrawingAction.value = true
+            currentLine.value = [absX, absY]
+        } else {
+            currentLine.value.push(absX, absY)
         }
-        lastDrawPos = { x: canvasX, y: canvasY }
     } else {
-        lastDrawPos = null
+        if (isDrawingAction.value) {
+            const page = currentPage.value
+            // 修复 TS 报错
+            if (!drawings.value[page]) drawings.value[page] = []
+            
+            drawings.value[page]!.push({
+                points: [...currentLine.value],
+                stroke: '#ef4444',
+                strokeWidth: 4,
+                tension: 0.5,
+                lineCap: 'round',
+                lineJoin: 'round'
+            })
+            currentLine.value = []
+            isDrawingAction.value = false
+        }
     }
 }
-
-const slideStyle = reactive({
-    boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
-    borderRadius: '4px',
-    position: 'relative' as const
-})
 </script>
 
 <style scoped lang="scss">
-// 变量定义
 $primary-color: #409eff;
 $sidebar-bg: #1e293b;
 $main-bg: #f3f4f6;
-$glass-border: 1px solid rgba(255, 255, 255, 0.2);
 
 .presentation-container {
     height: 100vh;
     display: flex;
     flex-direction: column;
     background-color: $main-bg;
-    transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+    overflow: hidden;
 
     &.is-fullscreen {
         background-color: #000;
-        .stage {
-            padding: 0;
-            background: #000;
-        }
+        .header, .sidebar { display: none; }
+        .main-content { padding: 0; }
+        .stage-area { padding: 0; background: #000; }
     }
 }
 
 .header {
-    height: 64px;
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(10px);
-    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+    height: 60px;
+    background: white;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0 24px;
+    padding: 0 20px;
+    border-bottom: 1px solid #eee;
     flex-shrink: 0;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
-    z-index: 10;
-
-    .left {
-        display: flex;
-        align-items: center;
-        
-        .back-btn {
-            margin-right: 12px;
-            &:hover {
-                background-color: #ecf5ff;
-                color: $primary-color;
-            }
-        }
-    }
-
+    
     .file-name {
         font-weight: 600;
-        color: #334155;
-        font-size: 14px;
+        margin-left: 10px;
+        color: #333;
     }
 }
 
 .main-content {
     flex: 1;
     display: flex;
-    overflow: hidden;
-    position: relative;
+    height: calc(100vh - 60px);
 }
 
 .sidebar {
-    width: 260px;
+    width: 240px;
     background: $sidebar-bg;
-    overflow-y: overlay;
-    padding: 20px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    overflow-y: auto;
+    padding: 20px;
     flex-shrink: 0;
 
-    &::-webkit-scrollbar {
-        width: 6px;
-    }
-    &::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.2);
-        border-radius: 3px;
-    }
-
     .thumbnail-wrapper {
+        margin-bottom: 20px;
         cursor: pointer;
-        transition: all 0.3s ease;
+        border: 2px solid transparent;
+        border-radius: 6px;
+        overflow: hidden;
+        background: white;
         position: relative;
-        padding: 4px;
-        border-radius: 8px;
+        opacity: 0.7;
+        transition: all 0.2s;
 
-        &:hover {
-            background: rgba(255, 255, 255, 0.05);
-            transform: translateY(-2px);
-        }
-
+        &:hover { opacity: 1; }
         &.active {
-            background: rgba($primary-color, 0.15);
-            
-            .thumb-box {
-                border-color: $primary-color;
-                box-shadow: 0 0 0 3px rgba($primary-color, 0.3);
-            }
-
-            &::after {
-                content: '';
-                position: absolute;
-                left: -16px;
-                top: 50%;
-                transform: translateY(-50%);
-                width: 4px;
-                height: 24px;
-                background: $primary-color;
-                border-radius: 0 4px 4px 0;
-            }
+            border-color: $primary-color;
+            opacity: 1;
+            box-shadow: 0 0 0 3px rgba($primary-color, 0.2);
         }
 
-        .thumb-box {
-            border: 2px solid transparent;
-            background: white;
-            border-radius: 6px;
-            overflow: hidden;
-            line-height: 0;
-            transition: border-color 0.3s, box-shadow 0.3s;
-        }
-
-        .thumb-canvas {
-            width: 100%;
-            height: auto;
-            display: block;
+        .thumb-number {
+            position: absolute;
+            top: 4px;
+            left: 4px;
+            background: rgba(0,0,0,0.6);
+            color: white;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 10;
         }
     }
 }
 
-.stage {
+.stage-area {
     flex: 1;
     background: #eef0f3;
-    background-image: radial-gradient(#dfe3e8 1px, transparent 1px);
-    background-size: 20px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
     position: relative;
     padding: 20px;
+    overflow: hidden;
 }
 
-// 悬浮控件通用样式
-%floating-pill {
-    position: absolute;
-    background: rgba(30, 41, 59, 0.7);
-    backdrop-filter: blur(8px);
-    color: white;
-    border-radius: 50px;
-    padding: 8px 20px;
-    font-size: 14px;
-    z-index: 1000;
-    border: $glass-border;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-    transition: all 0.3s;
-    user-select: none;
-
-    &:hover {
-        background: rgba(30, 41, 59, 0.9);
-        transform: scale(1.05);
-    }
+.my-swiper {
+    width: 100%;
+    height: 100%;
 }
 
-.fullscreen-exit-btn {
-    @extend %floating-pill;
-    top: 30px;
-    right: 30px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.fullscreen-page-indicator {
-    @extend %floating-pill;
-    bottom: 30px;
-    left: 50%;
-    transform: translateX(-50%);
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 1px;
-}
-
-.drawing-tip {
-    @extend %floating-pill;
-    top: 100px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(234, 179, 8, 0.9);
-    color: #0f172a;
-    font-weight: 600;
-    border: none;
-    animation: fadeInDown 0.5s ease;
-}
-
-@keyframes fadeInDown {
-    from { opacity: 0; transform: translate(-50%, -20px); }
-    to { opacity: 1; transform: translate(-50%, 0); }
-}
-
-.laser-pointer {
-    position: absolute;
-    width: 20px;
-    height: 20px;
-    background: rgba(239, 68, 68, 0.6);
-    border: 2px solid #fff;
-    border-radius: 50%;
-    pointer-events: none;
-    transform: translate(-50%, -50%);
-    z-index: 9999;
-    box-shadow: 0 0 15px rgba(239, 68, 68, 0.8), inset 0 0 5px rgba(255, 255, 255, 0.5);
-    transition: width 0.1s, height 0.1s, opacity 0.2s;
-
-    &.drawing {
-        width: 8px;
-        height: 8px;
-        background: #ef4444;
-        border-color: #fef08a;
-        box-shadow: 0 0 10px #ef4444;
-    }
-}
-
-.slide-wrapper {
-    line-height: 0;
+.slide-content {
+    width: 100%;
+    height: 100%;
     position: relative;
-    border-radius: 8px;
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3) !important;
-    transition: transform 0.2s;
+    display: flex; /* 关键：让内容居中 */
+    justify-content: center;
+    align-items: center;
 }
 
-.drawing-canvas {
+.layer-wrapper {
+    position: relative;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    background: white;
+}
+
+.pdf-layer {
+    display: block;
+    pointer-events: none;
+}
+
+.konva-wrapper {
     position: absolute;
     top: 0;
     left: 0;
     width: 100%;
     height: 100%;
-    z-index: 10;
     pointer-events: none;
+    z-index: 10;
+}
+
+.fullscreen-ui {
+    position: absolute;
+    z-index: 100;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+
+    .indicator, .exit-btn, .drawing-tip {
+        position: absolute;
+        background: rgba(0,0,0,0.6);
+        color: white;
+        padding: 8px 16px;
+        border-radius: 20px;
+        backdrop-filter: blur(4px);
+        pointer-events: auto;
+    }
+
+    .indicator { bottom: 30px; left: 50%; transform: translateX(-50%); }
+    .exit-btn { top: 30px; right: 30px; cursor: pointer; display: flex; align-items: center; gap: 5px;}
+    .drawing-tip { top: 100px; left: 50%; transform: translateX(-50%); color: #fcd34d; }
 }
 </style>
