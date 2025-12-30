@@ -3,7 +3,7 @@
 
         <div class="header" v-show="!isFullscreen">
             <div class="left">
-                <el-button type="primary" size="small" @click="triggerUpload">📂 打开文档</el-button>
+                <el-button @click="goHome" :icon="Back" circle class="back-btn" title="返回首页" />
                 <span class="file-name" v-if="fileName">{{ fileName }}</span>
             </div>
             <div class="right">
@@ -11,10 +11,9 @@
                     开始全屏演示 (自动开启手势)
                 </el-button>
             </div>
-            <input type="file" ref="fileInputRef" accept=".pptx,.pdf" style="display:none" @change="handleFileChange" />
         </div>
 
-        <div class="main-content" v-loading="loading" element-loading-text="正在处理高清渲染...">
+        <div class="main-content">
 
             <div class="sidebar" v-show="!isFullscreen">
                 <div v-for="page in totalPages" :key="page" class="thumbnail-wrapper"
@@ -59,23 +58,30 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
-import * as pdfjsLib from 'pdfjs-dist'
-import { Monitor, Close } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
+import { Monitor, Close, Back } from '@element-plus/icons-vue'
 import GestureController from '@/components/GestureController.vue'
+import { usePresentationStore } from '@/stores/presentation'
 
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker?url'
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker
+const router = useRouter()
+const store = usePresentationStore()
 
 // --- 状态变量 ---
-const loading = ref(false)
 const isFullscreen = ref(false)
 const isDrawingMode = ref(false)
-const fileName = ref('')
-const fileInputRef = ref<HTMLInputElement | null>(null)
+const fileName = ref(store.fileName)
+
+// DOM 引用
 const containerRef = ref<HTMLElement | null>(null)
 const stageRef = ref<HTMLElement | null>(null)
 const mainCanvasRef = ref<HTMLCanvasElement | null>(null)
 const drawingCanvasRef = ref<HTMLCanvasElement | null>(null)
+const thumbRefs = ref<Record<number, HTMLCanvasElement>>({})
+
+// PDF 状态
+const currentPage = ref(1)
+const totalPages = ref(0)
+let currentRenderTask: any = null
 
 // 激光笔状态
 const isDrawingAction = ref(false)
@@ -83,81 +89,56 @@ const pointerX = ref(0)
 const pointerY = ref(0)
 let lastDrawPos: { x: number, y: number } | null = null
 
-// PDF 数据
-let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null
-const currentPage = ref(1)
-const totalPages = ref(0)
-const thumbRefs = ref<Record<number, HTMLCanvasElement>>({})
-let currentRenderTask: any = null
-
-const GOTENBERG_URL = '/api-gotenberg/forms/libreoffice/convert'
-
-// --- 画板与激光笔逻辑 ---
-const handleToggleDrawing = (active: boolean) => {
-    isDrawingMode.value = active
-    if (active) {
-        initDrawingCanvas()
-    } else {
-        const ctx = drawingCanvasRef.value?.getContext('2d')
-        ctx?.clearRect(0, 0, drawingCanvasRef.value!.width, drawingCanvasRef.value!.height)
-        lastDrawPos = null
+// --- 生命周期 ---
+onMounted(async () => {
+    // 核心检查：如果 Store 中没有 PDF 对象（例如用户刷新了页面），回退到首页
+    if (!store.pdfDoc) {
+        router.replace('/')
+        return
     }
+
+    totalPages.value = store.pdfDoc.numPages
+    currentPage.value = 1
+
+    await renderMain()
+    // 延迟渲染缩略图，优先保证主屏加载
+    setTimeout(renderThumbnails, 100)
+
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    window.addEventListener('resize', onWindowResize)
+})
+
+onBeforeUnmount(() => {
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    window.removeEventListener('resize', onWindowResize)
+    // 离开页面时清理 Store，或者根据需求保留
+    // store.resetStore() 
+})
+
+// --- 导航逻辑 ---
+const goHome = () => {
+    store.resetStore()
+    router.push('/')
 }
 
-const initDrawingCanvas = () => {
-    if (!drawingCanvasRef.value || !mainCanvasRef.value) return
-    drawingCanvasRef.value.width = mainCanvasRef.value.width
-    drawingCanvasRef.value.height = mainCanvasRef.value.height
-
-    const ctx = drawingCanvasRef.value.getContext('2d')
-    if (ctx) {
-        ctx.lineCap = 'round'
-        ctx.lineJoin = 'round'
-        ctx.lineWidth = 5 // 稍微加粗一点
-        ctx.strokeStyle = '#ef4444' // 使用 Element Plus 的 Danger Red，更显眼
-        ctx.shadowBlur = 2; // 增加一点点光晕
-        ctx.shadowColor = '#ef4444';
-    }
+const jumpToPage = (p: number) => {
+    if (p === currentPage.value) return
+    currentPage.value = p
+    renderMain()
 }
 
-const handlePointerUpdate = (data: { x: number, y: number, isDrawing: boolean }) => {
-    if (!isDrawingMode.value || !stageRef.value || !drawingCanvasRef.value) return
-
-    const stageRect = stageRef.value.getBoundingClientRect()
-    const targetX = data.x * stageRect.width
-    const targetY = data.y * stageRect.height
-
-    pointerX.value = targetX
-    pointerY.value = targetY
-    isDrawingAction.value = data.isDrawing
-
-    const canvas = drawingCanvasRef.value
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    if (data.isDrawing) {
-        const canvasRect = canvas.getBoundingClientRect()
-        const globalX = stageRect.left + targetX
-        const globalY = stageRect.top + targetY
-        const canvasX = globalX - canvasRect.left
-        const canvasY = globalY - canvasRect.top
-
-        if (lastDrawPos) {
-            ctx.beginPath()
-            ctx.moveTo(lastDrawPos.x, lastDrawPos.y)
-            ctx.lineTo(canvasX, canvasY)
-            ctx.stroke()
-        }
-        lastDrawPos = { x: canvasX, y: canvasY }
-    } else {
-        lastDrawPos = null
-    }
+const nextPage = () => {
+    if (currentPage.value < totalPages.value) jumpToPage(currentPage.value + 1)
 }
 
-// --- 文件处理 & PDF 渲染 (保持原有逻辑) ---
+const prevPage = () => {
+    if (currentPage.value > 1) jumpToPage(currentPage.value - 1)
+}
+
+// --- PDF 渲染逻辑 ---
 const renderPageToCanvas = async (pageNumber: number, canvas: HTMLCanvasElement, fitToContainer: HTMLElement | null = null) => {
-    if (!pdfDoc) return
-    const page = await pdfDoc.getPage(pageNumber)
+    if (!store.pdfDoc) return
+    const page = await store.pdfDoc.getPage(pageNumber)
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
@@ -166,16 +147,20 @@ const renderPageToCanvas = async (pageNumber: number, canvas: HTMLCanvasElement,
     let scale = 1
 
     if (fitToContainer) {
+        // 适配容器大小，留出一点边距
         const containerW = fitToContainer.clientWidth - 40
         const containerH = fitToContainer.clientHeight - 40
         const scaleW = containerW / viewportRaw.width
         const scaleH = containerH / viewportRaw.height
         scale = Math.min(scaleW, scaleH)
     } else {
+        // 缩略图固定宽度比例
         scale = 200 / viewportRaw.width
     }
 
     const finalViewport = page.getViewport({ scale: scale })
+    
+    // 设置 Canvas 尺寸（高清屏适配）
     canvas.width = Math.floor(finalViewport.width * dpr)
     canvas.height = Math.floor(finalViewport.height * dpr)
     canvas.style.width = `${Math.floor(finalViewport.width)}px`
@@ -184,66 +169,38 @@ const renderPageToCanvas = async (pageNumber: number, canvas: HTMLCanvasElement,
     const renderContext = {
         canvasContext: ctx,
         viewport: finalViewport,
-        transform: [dpr, 0, 0, dpr, 0, 0],
+        transform: [dpr, 0, 0, dpr, 0, 0], // CSS 缩放矩阵
         canvas: ctx.canvas
     }
 
-    if (fitToContainer && currentRenderTask) currentRenderTask.cancel()
-    const task = page.render(renderContext as any)
-    if (fitToContainer) currentRenderTask = task
-    await task.promise
-
-    if (isDrawingMode.value) initDrawingCanvas()
-}
-
-const triggerUpload = () => fileInputRef.value?.click()
-
-const handleFileChange = async (event: Event) => {
-    const file = (event.target as HTMLInputElement).files?.[0]
-    if (!file) return
-    fileName.value = file.name
-    loading.value = true
-    try {
-        let arrayBuffer: ArrayBuffer
-        if (file.type === 'application/pdf') {
-            arrayBuffer = await file.arrayBuffer()
-        } else {
-            arrayBuffer = await convertPPTX(file)
-        }
-        await loadPdf(arrayBuffer)
-    } catch (e) {
-        console.error(e)
-        alert("文件加载失败")
-    } finally {
-        loading.value = false
+    // 如果是主屏渲染，取消上一次未完成的任务
+    if (fitToContainer && currentRenderTask) {
+        currentRenderTask.cancel()
     }
-}
 
-const convertPPTX = async (file: File) => {
-    const formData = new FormData()
-    formData.append('files', file)
-    const res = await fetch(GOTENBERG_URL, { method: 'POST', body: formData })
-    if (!res.ok) throw new Error('转换失败')
-    return await res.arrayBuffer()
-}
+    const task = page.render(renderContext as any)
+    
+    if (fitToContainer) {
+        currentRenderTask = task
+    }
 
-const loadPdf = async (data: ArrayBuffer) => {
-    if (pdfDoc) pdfDoc.destroy()
-    const loadingTask = pdfjsLib.getDocument({ data: data, verbosity: 0 })
-    pdfDoc = await loadingTask.promise
-    totalPages.value = pdfDoc.numPages
-    currentPage.value = 1
-    await renderMain()
-    setTimeout(renderThumbnails, 100)
+    try {
+        await task.promise
+    } catch (e: any) {
+        if (e.name !== 'RenderingCancelledException') {
+            console.error(e)
+        }
+    }
+
+    // 如果处于画板模式，重置画板层尺寸
+    if (fitToContainer && isDrawingMode.value) {
+        initDrawingCanvas()
+    }
 }
 
 const renderMain = async () => {
     if (!mainCanvasRef.value || !stageRef.value) return
     await renderPageToCanvas(currentPage.value, mainCanvasRef.value, stageRef.value)
-}
-
-const setThumbRef = (el: HTMLCanvasElement, page: number) => {
-    if (el) thumbRefs.value[page] = el
 }
 
 const renderThumbnails = async () => {
@@ -253,14 +210,11 @@ const renderThumbnails = async () => {
     }
 }
 
-const jumpToPage = (p: number) => {
-    if (p === currentPage.value) return
-    currentPage.value = p
-    renderMain()
+const setThumbRef = (el: HTMLCanvasElement, page: number) => {
+    if (el) thumbRefs.value[page] = el
 }
-const nextPage = () => { if (currentPage.value < totalPages.value) jumpToPage(currentPage.value + 1) }
-const prevPage = () => { if (currentPage.value > 1) jumpToPage(currentPage.value - 1) }
 
+// --- 全屏逻辑 ---
 const toggleFullscreen = () => {
     if (!containerRef.value) return
     if (!document.fullscreenElement) {
@@ -276,7 +230,9 @@ const exitFullscreen = () => {
 
 const onFullscreenChange = () => {
     isFullscreen.value = !!document.fullscreenElement
+    // 退出全屏时关闭画板
     if (!isFullscreen.value) handleToggleDrawing(false)
+    // 重新计算布局渲染
     setTimeout(() => renderMain(), 200)
 }
 
@@ -285,15 +241,71 @@ const onWindowResize = () => {
     renderMain()
 }
 
-onMounted(() => {
-    document.addEventListener('fullscreenchange', onFullscreenChange)
-    window.addEventListener('resize', onWindowResize)
-})
+// --- 画板与激光笔逻辑 ---
+const handleToggleDrawing = (active: boolean) => {
+    isDrawingMode.value = active
+    if (active) {
+        initDrawingCanvas()
+    } else {
+        const ctx = drawingCanvasRef.value?.getContext('2d')
+        ctx?.clearRect(0, 0, drawingCanvasRef.value!.width, drawingCanvasRef.value!.height)
+        lastDrawPos = null
+    }
+}
 
-onBeforeUnmount(() => {
-    document.removeEventListener('fullscreenchange', onFullscreenChange)
-    window.removeEventListener('resize', onWindowResize)
-})
+const initDrawingCanvas = () => {
+    if (!drawingCanvasRef.value || !mainCanvasRef.value) return
+    // 保持画板与主 Canvas 像素一致
+    drawingCanvasRef.value.width = mainCanvasRef.value.width
+    drawingCanvasRef.value.height = mainCanvasRef.value.height
+    
+    const ctx = drawingCanvasRef.value.getContext('2d')
+    if (ctx) {
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+        ctx.lineWidth = 5
+        ctx.strokeStyle = '#ef4444' // 红色笔迹
+        ctx.shadowBlur = 2
+        ctx.shadowColor = '#ef4444'
+    }
+}
+
+const handlePointerUpdate = (data: { x: number, y: number, isDrawing: boolean }) => {
+    if (!isDrawingMode.value || !stageRef.value || !drawingCanvasRef.value) return
+
+    const stageRect = stageRef.value.getBoundingClientRect()
+    // 计算相对于 Stage 的坐标
+    const targetX = data.x * stageRect.width
+    const targetY = data.y * stageRect.height
+
+    pointerX.value = targetX
+    pointerY.value = targetY
+    isDrawingAction.value = data.isDrawing
+
+    const canvas = drawingCanvasRef.value
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    if (data.isDrawing) {
+        const canvasRect = canvas.getBoundingClientRect()
+        // 转换全局坐标到 Canvas 内部坐标
+        const globalX = stageRect.left + targetX
+        const globalY = stageRect.top + targetY
+        const canvasX = globalX - canvasRect.left
+        const canvasY = globalY - canvasRect.top
+
+        // 绘制线条
+        if (lastDrawPos) {
+            ctx.beginPath()
+            ctx.moveTo(lastDrawPos.x, lastDrawPos.y)
+            ctx.lineTo(canvasX, canvasY)
+            ctx.stroke()
+        }
+        lastDrawPos = { x: canvasX, y: canvasY }
+    } else {
+        lastDrawPos = null
+    }
+}
 
 const slideStyle = reactive({
     boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
@@ -302,13 +314,11 @@ const slideStyle = reactive({
 })
 </script>
 
-/* src/views/Presentation.vue 中的样式替换建议 */
 <style scoped lang="scss">
 // 变量定义
 $primary-color: #409eff;
-$sidebar-bg: #1e293b; // 更现代的深蓝灰
+$sidebar-bg: #1e293b;
 $main-bg: #f3f4f6;
-$glass-bg: rgba(255, 255, 255, 0.15);
 $glass-border: 1px solid rgba(255, 255, 255, 0.2);
 
 .presentation-container {
@@ -320,7 +330,6 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
 
     &.is-fullscreen {
         background-color: #000;
-
         .stage {
             padding: 0;
             background: #000;
@@ -329,7 +338,7 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .header {
-    height: 64px; // 增加高度
+    height: 64px;
     background: rgba(255, 255, 255, 0.95);
     backdrop-filter: blur(10px);
     border-bottom: 1px solid rgba(0, 0, 0, 0.05);
@@ -341,8 +350,20 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
     z-index: 10;
 
+    .left {
+        display: flex;
+        align-items: center;
+        
+        .back-btn {
+            margin-right: 12px;
+            &:hover {
+                background-color: #ecf5ff;
+                color: $primary-color;
+            }
+        }
+    }
+
     .file-name {
-        margin-left: 12px;
         font-weight: 600;
         color: #334155;
         font-size: 14px;
@@ -359,7 +380,7 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
 .sidebar {
     width: 260px;
     background: $sidebar-bg;
-    overflow-y: overlay; // 滚动条覆盖模式
+    overflow-y: overlay;
     padding: 20px 16px;
     display: flex;
     flex-direction: column;
@@ -367,11 +388,9 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
     border-right: 1px solid rgba(255, 255, 255, 0.05);
     flex-shrink: 0;
 
-    // 隐藏默认滚动条但保留功能
     &::-webkit-scrollbar {
         width: 6px;
     }
-
     &::-webkit-scrollbar-thumb {
         background: rgba(255, 255, 255, 0.2);
         border-radius: 3px;
@@ -391,13 +410,12 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
 
         &.active {
             background: rgba($primary-color, 0.15);
-
+            
             .thumb-box {
                 border-color: $primary-color;
                 box-shadow: 0 0 0 3px rgba($primary-color, 0.3);
             }
 
-            // 添加页码角标
             &::after {
                 content: '';
                 position: absolute;
@@ -431,7 +449,7 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
 .stage {
     flex: 1;
     background: #eef0f3;
-    background-image: radial-gradient(#dfe3e8 1px, transparent 1px); // 点阵背景
+    background-image: radial-gradient(#dfe3e8 1px, transparent 1px);
     background-size: 20px 20px;
     display: flex;
     align-items: center;
@@ -441,7 +459,7 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
     padding: 20px;
 }
 
-// 统一悬浮控件风格
+// 悬浮控件通用样式
 %floating-pill {
     position: absolute;
     background: rgba(30, 41, 59, 0.7);
@@ -454,6 +472,7 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
     border: $glass-border;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
     transition: all 0.3s;
+    user-select: none;
 
     &:hover {
         background: rgba(30, 41, 59, 0.9);
@@ -478,18 +497,14 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
     transform: translateX(-50%);
     font-variant-numeric: tabular-nums;
     letter-spacing: 1px;
-
-    &:hover {
-        transform: translateX(-50%) scale(1.05);
-    }
 }
 
 .drawing-tip {
     @extend %floating-pill;
-    top: 100px; // 下移一点避免遮挡
+    top: 100px;
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(234, 179, 8, 0.9); // 黄色警告色
+    background: rgba(234, 179, 8, 0.9);
     color: #0f172a;
     font-weight: 600;
     border: none;
@@ -497,37 +512,28 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 @keyframes fadeInDown {
-    from {
-        opacity: 0;
-        transform: translate(-50%, -20px);
-    }
-
-    to {
-        opacity: 1;
-        transform: translate(-50%, 0);
-    }
+    from { opacity: 0; transform: translate(-50%, -20px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
 }
 
 .laser-pointer {
     position: absolute;
     width: 20px;
     height: 20px;
-    background: rgba(239, 68, 68, 0.6); // 红色
+    background: rgba(239, 68, 68, 0.6);
     border: 2px solid #fff;
     border-radius: 50%;
     pointer-events: none;
     transform: translate(-50%, -50%);
     z-index: 9999;
     box-shadow: 0 0 15px rgba(239, 68, 68, 0.8), inset 0 0 5px rgba(255, 255, 255, 0.5);
-    transition: width 0.1s cubic-bezier(0.4, 0, 0.2, 1),
-        height 0.1s cubic-bezier(0.4, 0, 0.2, 1),
-        opacity 0.2s;
+    transition: width 0.1s, height 0.1s, opacity 0.2s;
 
     &.drawing {
         width: 8px;
         height: 8px;
         background: #ef4444;
-        border-color: #fef08a; // 黄色边框
+        border-color: #fef08a;
         box-shadow: 0 0 10px #ef4444;
     }
 }
@@ -536,7 +542,6 @@ $glass-border: 1px solid rgba(255, 255, 255, 0.2);
     line-height: 0;
     position: relative;
     border-radius: 8px;
-    // 增加 PPT 投影感
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3) !important;
     transition: transform 0.2s;
 }
